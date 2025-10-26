@@ -1,8 +1,8 @@
 {-# LANGUAGE BangPatterns #-}
 
 import Control.Monad.State.Strict (State, get, put, runState)
-import Control.Monad.State.Strict qualified as ST
 import Data.IntMap.Strict qualified as IM
+import Data.IntSet qualified as IS
 import Data.List (foldl')
 
 data Value = Value
@@ -120,14 +120,79 @@ divV x y = do
 
 --------------- end of non-primitive binops --------------
 
+topo :: Value -> [Value]
+topo root = order
+  where
+    (order, _) = dfs root [] IS.empty
+    dfs :: Value -> [Value] -> IS.IntSet -> ([Value], IS.IntSet)
+    dfs v agg seen
+      | nodeId v `IS.member` seen = (agg, seen)
+      | otherwise = (v : agg', seen'')
+      where
+        seen' = IS.insert (nodeId v) seen
+        (agg', seen'') =
+          foldl'
+            (\(agg0, seen0) p -> dfs p agg0 seen0)
+            (agg, seen')
+            (parents v)
+
+backward :: Value -> IM.IntMap Double
+backward out = foldl' step grads0 (topo out)
+  where
+    grads0 = IM.singleton (nodeId out) 1.0
+    step :: IM.IntMap Double -> Value -> IM.IntMap Double
+    step grads v = foldl' (\g (vid, gadd) -> IM.insertWith (+) vid gadd g) grads contribs
+      where
+        delCurr = IM.findWithDefault 0 (nodeId v) grads
+        contribs = localBack v delCurr
+
+-- mimics Kapathy's python micrograd example
+-- https://github.com/karpathy/micrograd
 buildExpr :: Gen Value
 buildExpr = do
   a <- newValue (-4.0)
   b <- newValue 2
   c <- a `addV` b
-  c `addV` c
+
+  ab <- a `multV` b
+  bPow3 <- b `powConstV` 3
+  d <- ab `addV` bPow3
+
+  cc <- c `addV` c
+  one1 <- newValue 1
+  c' <- cc `addV` one1
+
+  one2 <- newValue 1
+  na <- negV a
+  tmpC'' <- one2 `addV` c'
+  tmpC''2 <- c' `addV` tmpC''
+  c'' <- tmpC''2 `addV` na
+
+  twoD <- scalarMultV 2 d
+  ba <- b `addV` a
+  reluBA <- reluV ba
+  tmpD' <- d `addV` twoD
+  d' <- tmpD' `addV` reluBA
+
+  threeD' <- scalarMultV 3 d'
+  bMinusA <- b `subV` a
+  reluBminusA <- reluV bMinusA
+  tmpD'' <- d' `addV` threeD'
+  d'' <- tmpD'' `addV` reluBminusA
+
+  e <- c'' `subV` d''
+  f <- e `powConstV` 2
+
+  two <- newValue 2
+  g <- f `divV` two
+
+  ten <- newValue 10
+  tenOverF <- ten `divV` f
+  g `addV` tenOverF
 
 main :: IO ()
 main = do
   let (outNode, _) = runState buildExpr 0
   print outNode
+  let grads = backward outNode
+  print grads
